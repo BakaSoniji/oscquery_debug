@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.calver.outputs.version }}
+      tag: ${{ steps.calver.outputs.tag }}
+      prerelease: ${{ steps.calver.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: calver
+        run: |
+          YEAR=$(date -u +%Y)
+          MONTH=$(date -u +%-m)
+          PREFIX="v${YEAR}.${MONTH}"
+
+          LAST_PATCH=$(git tag -l "${PREFIX}.*" | grep -E "^${PREFIX}\.[0-9]+$" | sed "s/${PREFIX}\.//" | sort -n | tail -1)
+
+          if [ -z "$LAST_PATCH" ]; then
+            PATCH=0
+          else
+            PATCH=$((LAST_PATCH + 1))
+          fi
+
+          DEFAULT_BRANCH=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
+          BRANCH="${GITHUB_REF_NAME}"
+
+          if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+            VERSION="${YEAR}.${MONTH}.${PATCH}"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            SANITIZED=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+            VERSION="${YEAR}.${MONTH}.${PATCH}-${SANITIZED}.${GITHUB_RUN_NUMBER}"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}"
+
+  build:
+    needs: version
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: oscquery_debug-windows-x86_64.exe
+            cross: false
+
+          - name: macos-universal
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact: oscquery_debug-macos-universal
+            cross: false
+
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: oscquery_debug-linux-x86_64
+            cross: false
+
+          - name: linux-arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: oscquery_debug-linux-arm64
+            cross: true
+
+    runs-on: ${{ matrix.runner }}
+    name: Build ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Add x86_64 target for universal binary
+        if: matrix.name == 'macos-universal'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Patch version
+        shell: bash
+        run: |
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.version.outputs.version }}"/' Cargo.toml
+          rm -f Cargo.toml.bak
+
+      - name: Build
+        if: ${{ !matrix.cross && matrix.name != 'macos-universal' }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (macOS universal)
+        if: matrix.name == 'macos-universal'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/oscquery_debug \
+            target/x86_64-apple-darwin/release/oscquery_debug \
+            -output target/oscquery_debug
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows' && matrix.name != 'macos-universal'
+        run: cp target/${{ matrix.target }}/release/oscquery_debug ${{ matrix.artifact }}
+
+      - name: Prepare artifact (macOS universal)
+        if: matrix.name == 'macos-universal'
+        run: cp target/oscquery_debug ${{ matrix.artifact }}
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/oscquery_debug.exe ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: artifacts/*
