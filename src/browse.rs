@@ -84,12 +84,12 @@ fn make_key(service_type: &str, info: &ResolvedService) -> String {
 }
 
 fn to_discovered(service_type: &'static str, info: &ResolvedService) -> DiscoveredService {
-    let mut ipv4 = info
-        .get_addresses_v4()
+    let mut addresses = info
+        .get_addresses()
         .iter()
-        .map(|ip| ip.to_string())
+        .map(|ip| ip.to_ip_addr().to_string())
         .collect::<Vec<_>>();
-    ipv4.sort();
+    addresses.sort();
 
     let mut txt = info
         .get_properties()
@@ -103,7 +103,7 @@ fn to_discovered(service_type: &'static str, info: &ResolvedService) -> Discover
         instance: info.get_fullname().to_string(),
         hostname: info.get_hostname().to_string(),
         port: info.get_port(),
-        ipv4,
+        addresses,
         txt,
     }
 }
@@ -113,8 +113,8 @@ pub fn print_service(svc: &DiscoveredService) {
     println!("        Type:    {}", svc.service_type);
     println!("        Host:    {}", svc.hostname);
     println!("        Port:    {}", svc.port);
-    if !svc.ipv4.is_empty() {
-        println!("        IPv4:    {}", svc.ipv4.join(", "));
+    if !svc.addresses.is_empty() {
+        println!("        Addresses:    {}", svc.addresses.join(", "));
     }
     if !svc.txt.is_empty() {
         println!("        TXT:     {}", svc.txt.join(", "));

@@ -91,6 +91,6 @@ pub struct DiscoveredService {
     pub instance: String,
     pub hostname: String,
     pub port: u16,
-    pub ipv4: Vec<String>,
+    pub addresses: Vec<String>,
     pub txt: Vec<String>,
 }
