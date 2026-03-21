@@ -87,6 +87,7 @@ pub fn register_mdns_service(
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredService {
+    pub interface: String,
     pub service_type: &'static str,
     pub instance: String,
     pub hostname: String,
